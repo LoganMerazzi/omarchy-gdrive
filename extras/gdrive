@@ -1,0 +1,77 @@
+#!/bin/bash
+# Google Drive client for the Omarchy bar (rclone mount + bar widget helpers).
+#   gdrive status   -> Waybar-style JSON for the bar widget
+#   gdrive open [p] -> mount if needed, then open the Drive (or folder p) in Nautilus
+#   gdrive edit <f> -> mount if needed, then open file f in its default app
+#   gdrive toggle   -> mount/unmount
+#   gdrive web      -> open drive.google.com in the browser
+#   gdrive setup    -> one-time rclone OAuth setup (run in a terminal)
+
+REMOTE="gdrive"
+MOUNT_DIR="$HOME/GoogleDrive"
+SERVICE="rclone-gdrive.service"
+ICON="󰊶"
+
+is_mounted() { mountpoint -q "$MOUNT_DIR"; }
+is_configured() { command -v rclone >/dev/null && rclone listremotes 2>/dev/null | grep -qx "$REMOTE:"; }
+
+mount_drive() {
+  is_mounted && return 0
+  systemctl --user start "$SERVICE"
+  for _ in $(seq 1 30); do
+    is_mounted && return 0
+    sleep 0.2
+  done
+  notify-send -u critical "Google Drive" "Falha ao montar. Veja: journalctl --user -u $SERVICE"
+  return 1
+}
+
+case "${1:-status}" in
+  status)
+    if ! is_configured; then
+      printf '{"text":"%s","tooltip":"Google Drive: não configurado (clique para configurar)","class":"inactive"}\n' "$ICON"
+    elif is_mounted; then
+      printf '{"text":"%s","tooltip":"Google Drive: montado em ~/GoogleDrive\\nEsquerdo: abrir · Direito: desmontar · Meio: web","class":"active"}\n' "$ICON"
+    else
+      printf '{"text":"%s","tooltip":"Google Drive: desmontado\\nEsquerdo: montar e abrir · Direito: montar · Meio: web","class":"inactive"}\n' "$ICON"
+    fi
+    ;;
+  open)
+    if ! is_configured; then
+      exec omarchy-launch-floating-terminal-with-presentation "$0 setup" 2>/dev/null || exec xdg-terminal-exec "$0" setup
+    fi
+    mount_drive && exec uwsm-app -- nautilus --new-window "${2:-$MOUNT_DIR}"
+    ;;
+  edit)
+    [[ -n $2 ]] || { echo "uso: gdrive edit <arquivo>" >&2; exit 1; }
+    mount_drive && exec uwsm-app -- xdg-open "$2"
+    ;;
+  toggle)
+    if is_mounted; then
+      systemctl --user stop "$SERVICE" && notify-send "Google Drive" "Desmontado"
+    else
+      mount_drive && notify-send "Google Drive" "Montado em ~/GoogleDrive"
+    fi
+    ;;
+  web)
+    exec xdg-open "https://drive.google.com"
+    ;;
+  setup)
+    if ! command -v rclone >/dev/null; then
+      echo "Instalando rclone..."
+      sudo pacman -S --needed rclone || exit 1
+    fi
+    if ! is_configured; then
+      echo "Abrindo o navegador para autorizar o acesso ao Google Drive..."
+      rclone config create "$REMOTE" drive scope=drive || exit 1
+    fi
+    mkdir -p "$MOUNT_DIR"
+    systemctl --user daemon-reload
+    systemctl --user enable --now "$SERVICE"
+    echo "Pronto! Google Drive montado em $MOUNT_DIR"
+    ;;
+  *)
+    echo "uso: gdrive {status|open [pasta]|edit <arquivo>|toggle|web|setup}" >&2
+    exit 1
+    ;;
+esac
