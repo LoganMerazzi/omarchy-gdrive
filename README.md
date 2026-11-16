@@ -2,6 +2,8 @@
 
 Plugin do [Omarchy shell](https://omarchy.org) para o Google Drive montado com o `rclone`. Mostra na barra se o Drive está montado e, no painel, o espaço usado, as pastas e os arquivos abertos recentemente (lidos do cache VFS do rclone), com atalho para reabrir cada um para edição.
 
+![Google Drive: painel com o status de montagem, o armazenamento, os arquivos recentes e as pastas (nomes borrados)](screenshots/gdrive.png)
+
 ## Instalação
 
 ```bash
