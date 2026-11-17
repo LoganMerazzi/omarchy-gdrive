@@ -7,14 +7,53 @@
 #   gdrive toggle   -> mount/unmount
 #   gdrive web      -> open drive.google.com in the browser
 #   gdrive setup    -> one-time rclone OAuth setup (run in a terminal)
+#   gdrive client   -> switch the remote to your own Google OAuth client (docs/client-id.md)
+# Messages are in Portuguese when LANG/LC_ALL/LC_MESSAGES is pt*, English otherwise.
 
 REMOTE="gdrive"
 MOUNT_DIR="$HOME/GoogleDrive"
 SERVICE="rclone-gdrive.service"
 ICON="󰊶"
+DOCS="https://github.com/LoganMerazzi/omarchy-gdrive/blob/main/docs"
+
+case "${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}" in
+  pt*) PT=1 ;;
+  *) PT=0 ;;
+esac
+# t "português" "english": print the message in the user's language.
+t() { if ((PT)); then printf '%s' "$1"; else printf '%s' "$2"; fi; }
+CLIENT_DOC="$DOCS/$(t client-id.md client-id.en.md)"
 
 is_mounted() { mountpoint -q "$MOUNT_DIR"; }
 is_configured() { command -v rclone >/dev/null && rclone listremotes 2>/dev/null | grep -qx "$REMOTE:"; }
+
+# Reads CLIENT_ID / CLIENT_SECRET from the terminal. Both stay empty when the
+# user just presses Enter, which keeps rclone's shared default client.
+ask_client() {
+  CLIENT_ID="" CLIENT_SECRET=""
+  echo
+  t "O Google Drive pode usar o client padrão do rclone (sem configuração)
+ou um client OAuth seu (recomendado para uso diário: cota própria e sem
+depender do client compartilhado, que o rclone vai aposentar).
+Prós, contras e passo a passo: $CLIENT_DOC" \
+    "Google Drive can use rclone's default client (no setup needed)
+or your own OAuth client (recommended for daily use: your own quota, and no
+dependency on the shared client, which rclone is retiring).
+Pros, cons and step by step: $CLIENT_DOC"
+  printf '\n\n'
+  read -rp "$(t "Client ID (Enter para usar o padrão do rclone): " "Client ID (Enter to use rclone's default): ")" CLIENT_ID
+  [[ -n $CLIENT_ID ]] || return 0
+  read -rsp "Client secret: " CLIENT_SECRET
+  echo
+  if [[ -z $CLIENT_SECRET ]]; then
+    t "Secret vazio: usando o client padrão do rclone." "Empty secret: using rclone's default client."
+    echo
+    CLIENT_ID=""
+  fi
+}
+
+UNVERIFIED_HINT="$(t "O Google vai avisar que o app não foi verificado: clique em Avançado > Acessar." \
+  "Google will warn that the app isn't verified: click Advanced > Go to.")"
 
 mount_drive() {
   is_mounted && return 0
@@ -23,19 +62,25 @@ mount_drive() {
     is_mounted && return 0
     sleep 0.2
   done
-  notify-send -u critical "Google Drive" "Falha ao montar. Veja: journalctl --user -u $SERVICE"
+  notify-send -u critical "Google Drive" "$(t "Falha ao montar. Veja" "Mount failed. See"): journalctl --user -u $SERVICE"
   return 1
 }
 
 case "${1:-status}" in
   status)
     if ! is_configured; then
-      printf '{"text":"%s","tooltip":"Google Drive: não configurado (clique para configurar)","class":"inactive"}\n' "$ICON"
+      tip=$(t "Google Drive: não configurado (clique para configurar)" "Google Drive: not set up (click to set up)")
+      class=inactive
     elif is_mounted; then
-      printf '{"text":"%s","tooltip":"Google Drive: montado em ~/GoogleDrive\\nEsquerdo: abrir · Direito: desmontar · Meio: web","class":"active"}\n' "$ICON"
+      tip=$(t "Google Drive: montado em ~/GoogleDrive\\nEsquerdo: abrir · Direito: desmontar · Meio: web" \
+        "Google Drive: mounted at ~/GoogleDrive\\nLeft: open · Right: unmount · Middle: web")
+      class=active
     else
-      printf '{"text":"%s","tooltip":"Google Drive: desmontado\\nEsquerdo: montar e abrir · Direito: montar · Meio: web","class":"inactive"}\n' "$ICON"
+      tip=$(t "Google Drive: desmontado\\nEsquerdo: montar e abrir · Direito: montar · Meio: web" \
+        "Google Drive: unmounted\\nLeft: mount and open · Right: mount · Middle: web")
+      class=inactive
     fi
+    printf '{"text":"%s","tooltip":"%s","class":"%s"}\n' "$ICON" "$tip" "$class"
     ;;
   open)
     if ! is_configured; then
@@ -46,14 +91,14 @@ case "${1:-status}" in
     mount_drive && exec uwsm-app -- xdg-open "${2:-$MOUNT_DIR}"
     ;;
   edit)
-    [[ -n $2 ]] || { echo "uso: gdrive edit <arquivo>" >&2; exit 1; }
+    [[ -n $2 ]] || { t "uso: gdrive edit <arquivo>" "usage: gdrive edit <file>" >&2; echo >&2; exit 1; }
     mount_drive && exec uwsm-app -- xdg-open "$2"
     ;;
   toggle)
     if is_mounted; then
-      systemctl --user stop "$SERVICE" && notify-send "Google Drive" "Desmontado"
+      systemctl --user stop "$SERVICE" && notify-send "Google Drive" "$(t "Desmontado" "Unmounted")"
     else
-      mount_drive && notify-send "Google Drive" "Montado em ~/GoogleDrive"
+      mount_drive && notify-send "Google Drive" "$(t "Montado em" "Mounted at") ~/GoogleDrive"
     fi
     ;;
   web)
@@ -61,20 +106,48 @@ case "${1:-status}" in
     ;;
   setup)
     if ! command -v rclone >/dev/null; then
-      echo "Instalando rclone..."
+      t "Instalando rclone..." "Installing rclone..."; echo
       sudo pacman -S --needed rclone || exit 1
     fi
     if ! is_configured; then
-      echo "Abrindo o navegador para autorizar o acesso ao Google Drive..."
-      rclone config create "$REMOTE" drive scope=drive || exit 1
+      ask_client
+      t "Abrindo o navegador para autorizar o acesso ao Google Drive..." \
+        "Opening the browser to authorize Google Drive access..."; echo
+      if [[ -n $CLIENT_ID ]]; then
+        echo "$UNVERIFIED_HINT"
+        rclone config create "$REMOTE" drive scope=drive client_id="$CLIENT_ID" client_secret="$CLIENT_SECRET" || exit 1
+      else
+        rclone config create "$REMOTE" drive scope=drive || exit 1
+      fi
     fi
     mkdir -p "$MOUNT_DIR"
     systemctl --user daemon-reload
     systemctl --user enable --now "$SERVICE"
-    echo "Pronto! Google Drive montado em $MOUNT_DIR"
+    t "Pronto! Google Drive montado em $MOUNT_DIR" "Done! Google Drive mounted at $MOUNT_DIR"; echo
+    ;;
+  client)
+    if ! is_configured; then
+      t "O remote $REMOTE ainda não existe: rode 'gdrive setup' primeiro." \
+        "The $REMOTE remote doesn't exist yet: run 'gdrive setup' first." >&2
+      echo >&2
+      exit 1
+    fi
+    ask_client
+    if [[ -z $CLIENT_ID ]]; then
+      t "Nada mudou. Para voltar ao client padrão, veja o fim de $CLIENT_DOC" \
+        "Nothing changed. To go back to the default client, see the end of $CLIENT_DOC"; echo
+      exit 0
+    fi
+    rclone config update "$REMOTE" client_id="$CLIENT_ID" client_secret="$CLIENT_SECRET" >/dev/null || exit 1
+    t "Reautorizando..." "Re-authorizing..."; echo " $UNVERIFIED_HINT"
+    rclone config reconnect "$REMOTE:" || exit 1
+    systemctl --user restart "$SERVICE"
+    t "Pronto! O Google Drive agora usa o seu client." "Done! Google Drive now uses your own client."; echo
     ;;
   *)
-    echo "uso: gdrive {status|open [pasta]|edit <arquivo>|toggle|web|setup}" >&2
+    t "uso: gdrive {status|open [pasta]|edit <arquivo>|toggle|web|setup|client}" \
+      "usage: gdrive {status|open [folder]|edit <file>|toggle|web|setup|client}" >&2
+    echo >&2
     exit 1
     ;;
 esac
