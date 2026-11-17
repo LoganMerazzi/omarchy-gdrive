@@ -75,7 +75,9 @@ def list_folders(remote, mount_dir, mounted):
     entries = cached("folders.json", FOLDERS_TTL,
                      lambda: run_json(["rclone", "lsjson", "--dirs-only", f"{remote}:"], 15)) or []
     names = [e.get("Name", "") for e in entries if e.get("IsDir")]
-  names = sorted((n for n in names if n), key=str.casefold)
+  # Hidden folders (e.g. .Trash-1000, created when a file manager trashes
+  # something on the mount) are not Drive content the user browses.
+  names = sorted((n for n in names if n and not n.startswith(".")), key=str.casefold)
   return [{"name": n, "path": str(Path(mount_dir) / n)} for n in names]
 
 
