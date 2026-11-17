@@ -29,7 +29,7 @@ Panel {
   property double cacheBytes: 0
   property int pendingUploads: 0
   property var folders: []
-  property var recent: []
+  property var starred: []
   property string lastError: ""
 
   // Optimistic mount state: -1 follows reality, 0/1 while a stop/start settles.
@@ -37,7 +37,7 @@ Panel {
   readonly property bool active: _desired === -1 ? mounted : (_desired === 1)
   readonly property bool busy: mountProcess.running
 
-  // Keyboard cursor: "setup" | "header" | "recent" | "folders"
+  // Keyboard cursor: "setup" | "header" | "starred" | "folders"
   property string focusSection: "header"
   property int rowIndex: 0
   property bool cursorActive: false
@@ -55,7 +55,7 @@ Panel {
 
   function refresh() {
     if (statusProcess.running) return
-    statusProcess.command = ["python3", "-I", helperPath, "gdrive", mountDir, "8"]
+    statusProcess.command = ["python3", "-I", helperPath, "gdrive", mountDir, "20"]
     statusProcess.running = true
   }
 
@@ -73,7 +73,7 @@ Panel {
     cacheBytes = Number(s.cacheBytes || 0)
     pendingUploads = Number(s.pendingUploads || 0)
     folders = Array.isArray(s.folders) ? s.folders : []
-    recent = Array.isArray(s.recent) ? s.recent : []
+    starred = Array.isArray(s.starred) ? s.starred : []
     lastError = ""
     ensureCursor()
   }
@@ -95,21 +95,21 @@ Panel {
     close()
   }
 
-  function editFile(file) {
-    if (!file || !file.path) return
-    Quickshell.execDetached([gdriveBin, "edit", String(file.path)])
-    close()
+  // Starred folders outside My Drive (shared with me) aren't in the mount.
+  function openStarred(folder) {
+    if (!folder) return
+    if (folder.path) openFolder(String(folder.path))
+    else openUrl(folder.webUrl)
   }
 
-  function revealFile(file) {
-    if (!file || !file.path) return
-    Quickshell.execDetached(["uwsm-app", "--", "nautilus", "--select", String(file.path)])
+  function openUrl(url) {
+    if (!url) return
+    Qt.openUrlExternally(String(url))
     close()
   }
 
   function openWeb() {
-    Qt.openUrlExternally("https://drive.google.com")
-    close()
+    openUrl("https://drive.google.com")
   }
 
   // ── Formatting ─────────────────────────────────────────────────────────
@@ -124,34 +124,9 @@ Panel {
     return value.toFixed(decimals).replace(/\.0+$/, "").replace(/(\.\d)0$/, "$1").replace(".", ",") + " " + units[i]
   }
 
-  function relativeTime(ts) {
-    var t = Number(ts || 0)
-    if (!isFinite(t) || t <= 0) return ""
-    var diff = Math.max(0, Math.floor(Date.now() / 1000 - t))
-    if (diff < 60) return "agora"
-    var m = Math.floor(diff / 60); if (m < 60) return "há " + m + " min"
-    var h = Math.floor(m / 60); if (h < 24) return "há " + h + " h"
-    var d = Math.floor(h / 24); return d === 1 ? "ontem" : "há " + d + " dias"
-  }
-
-  function fileGlyph(name) {
-    var ext = String(name || "").toLowerCase().split(".").pop()
-    if (["jpg", "jpeg", "png", "gif", "webp", "heic", "svg", "bmp"].indexOf(ext) !== -1) return "󰋩"
-    if (["mp4", "mov", "mkv", "webm", "avi"].indexOf(ext) !== -1) return "󰈫"
-    if (["xls", "xlsx", "ods", "csv"].indexOf(ext) !== -1) return "󰈛"
-    if (["ppt", "pptx", "odp"].indexOf(ext) !== -1) return "󰈧"
-    if (ext === "pdf") return "󰈦"
-    if (["doc", "docx", "odt", "txt", "md", "rtf"].indexOf(ext) !== -1) return "󰈙"
-    return "󰈔"
-  }
-
-  function fileMeta(file) {
-    var parts = []
-    if (file.dirty) parts.push("󰕒 enviando")
-    var when = relativeTime(file.accessedTs)
-    if (when !== "") parts.push(when)
-    if (file.folder) parts.push(file.folder)
-    return parts.join(" · ")
+  function starredMeta(folder) {
+    if (!folder.path) return "Compartilhado comigo · abre no navegador"
+    return folder.location ? folder.location : "Meu Drive"
   }
 
   function heroMeta() {
@@ -164,7 +139,7 @@ Panel {
   // ── Keyboard cursor ────────────────────────────────────────────────────
 
   function sectionLength(section) {
-    if (section === "recent") return recent.length
+    if (section === "starred") return starred.length
     if (section === "folders") return folders.length
     return 1
   }
@@ -172,7 +147,7 @@ Panel {
   function sections() {
     if (!configured) return ["setup"]
     var list = ["header"]
-    if (recent.length > 0) list.push("recent")
+    if (starred.length > 0) list.push("starred")
     if (folders.length > 0) list.push("folders")
     return list
   }
@@ -212,12 +187,12 @@ Panel {
     ensureCursor()
     if (focusSection === "setup") setup()
     else if (focusSection === "header") toggleMount()
-    else if (focusSection === "recent") editFile(recent[rowIndex])
+    else if (focusSection === "starred") openStarred(starred[rowIndex])
     else if (focusSection === "folders") openFolder(folders[rowIndex].path)
   }
 
   function scrollCursorIntoView() {
-    var column = focusSection === "recent" ? recentColumn : (focusSection === "folders" ? folderColumn : null)
+    var column = focusSection === "starred" ? starredColumn : (focusSection === "folders" ? folderColumn : null)
     if (focusSection === "header") { panelFlick.contentY = 0; return }
     if (!column || rowIndex >= column.children.length) return
     var item = column.children[rowIndex]
@@ -341,7 +316,6 @@ Panel {
         else if (k === "m") root.toggleMount()
         else if (k === "o") root.openFolder(root.mountDir)
         else if (k === "w") root.openWeb()
-        else if (k === "s" && root.cursorActive && root.focusSection === "recent") root.revealFile(root.recent[root.rowIndex])
       }
 
       Flickable {
@@ -470,41 +444,41 @@ Panel {
           }
 
           PanelSeparator {
-            visible: root.configured && root.recent.length > 0
+            visible: root.configured && root.starred.length > 0
             foreground: root.foreground
           }
 
           Column {
-            visible: root.configured && root.recent.length > 0
+            visible: root.configured && root.starred.length > 0
             width: parent.width
             spacing: Style.space(10)
 
             PanelSectionHeader {
-              text: "ABERTOS RECENTEMENTE"
+              text: "COM ESTRELA"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
 
             Column {
-              id: recentColumn
+              id: starredColumn
               width: parent.width
               spacing: Style.space(6)
 
               Repeater {
-                model: root.recent
+                model: root.starred
                 ActionRow {
                   required property var modelData
                   required property int index
-                  width: recentColumn.width
-                  section: "recent"
+                  width: starredColumn.width
+                  section: "starred"
                   rowIdx: index
-                  glyph: root.fileGlyph(modelData.name)
+                  glyph: "󰚝"
                   title: modelData.name
-                  subtitle: root.fileMeta(modelData)
-                  trailingGlyph: "󰉋"
-                  trailingTip: "Mostrar na pasta (s)"
-                  onActivated: root.editFile(modelData)
-                  onTrailingActivated: root.revealFile(modelData)
+                  subtitle: root.starredMeta(modelData)
+                  trailingGlyph: modelData.path && modelData.webUrl ? "󰖟" : ""
+                  trailingTip: "Abrir no navegador"
+                  onActivated: root.openStarred(modelData)
+                  onTrailingActivated: root.openUrl(modelData.webUrl)
                 }
               }
             }

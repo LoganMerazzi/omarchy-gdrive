@@ -1,25 +1,28 @@
 """Google Drive (rclone) status for the logan.gdrive bar widget.
 
-Usage: status.py <remote> <mount_dir> <recent_limit>
-Prints one JSON object. Network calls (rclone about / lsjson) are cached so
-opening the panel repeatedly doesn't hammer the Drive API.
+Usage: status.py <remote> <mount_dir> <starred_limit>
+Prints one JSON object. Network calls (rclone about / lsjson / starred query)
+are cached so opening the panel repeatedly doesn't hammer the Drive API. When a
+call fails (offline, rate limit) the last good cached value is used instead.
 """
 
 import json
-import re
 import os
 import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime
 from pathlib import Path
+from urllib.parse import quote
 
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
 STATE_DIR = CACHE_DIR / "omarchy-gdrive"
 RCLONE_CACHE = CACHE_DIR / "rclone"
 ABOUT_TTL = 600
 FOLDERS_TTL = 600
+STARRED_TTL = 600
+NODE_TTL = 86400  # folder name/parent lookups used to build starred paths
+FOLDER_MIME = "application/vnd.google-apps.folder"
 
 
 def rclone_configured(remote):
@@ -76,30 +79,110 @@ def list_folders(remote, mount_dir, mounted):
   return [{"name": n, "path": str(Path(mount_dir) / n)} for n in names]
 
 
-def parse_time(value):
-  # rclone writes RFC3339 with nanoseconds; Python only takes microseconds.
-  if not value:
-    return 0
-  text = re.sub(r"(\.\d{6})\d+", r"\1", str(value)).replace("Z", "+00:00")
+def load_json(name):
   try:
-    return datetime.fromisoformat(text).timestamp()
-  except ValueError:
-    return 0
+    return json.loads((STATE_DIR / name).read_text(encoding="utf-8"))
+  except (OSError, json.JSONDecodeError):
+    return None
 
 
-def scan_cache(remote, mount_dir, limit):
-  """Files rclone has cached locally (= opened recently), plus pending uploads."""
-  items = []
+def save_json(name, value):
+  STATE_DIR.mkdir(parents=True, exist_ok=True)
+  (STATE_DIR / name).write_text(json.dumps(value), encoding="utf-8")
+
+
+def access_token(remote):
+  # rclone refreshes and saves the OAuth token whenever it talks to the remote
+  # (the starred query runs right before this), so the stored one is current.
+  conf = run_json(["rclone", "config", "dump"], 10) or {}
+  try:
+    return json.loads(conf[remote]["token"])["access_token"]
+  except (KeyError, TypeError, ValueError):
+    return None
+
+
+def drive_get(token, file_id):
+  # curl rather than urllib: curl falls back to IPv4 at once (happy eyeballs),
+  # urllib tries every IPv6 address in turn and stalls on networks without it.
+  # The token goes in via stdin so it never shows up in the process list.
+  url = (f"https://www.googleapis.com/drive/v3/files/{quote(file_id)}"
+         "?fields=id,name,parents&supportsAllDrives=true")
+  completed = subprocess.run(["curl", "-sSf", "-m", "8", "-H", "@-", url],
+                             input=f"Authorization: Bearer {token}\n",
+                             capture_output=True, text=True, timeout=12, check=False)
+  if completed.returncode != 0:
+    raise LookupError(completed.stderr.strip() or "drive request failed")
+  return json.loads(completed.stdout)
+
+
+def starred_folders(remote):
+  """Starred folders with their path inside the mount ("" when outside My Drive).
+
+  rclone can list starred items but only returns parent IDs, and walking the
+  whole Drive to map IDs to paths takes minutes. So each parent chain is resolved
+  with one files.get per ancestor, memoised in nodes.json for a day.
+  Returns None on any failure so the caller keeps the previous result.
+  """
+  query = f"starred = true and trashed = false and mimeType = '{FOLDER_MIME}'"
+  entries = run_json(["rclone", "backend", "query", f"{remote}:", query], 20)
+  if entries is None:
+    return None
+
+  now = time.time()
+  nodes = load_json("nodes.json") or {}
+  token = None
+
+  def node(file_id):
+    nonlocal token
+    cached_node = nodes.get(file_id)
+    if cached_node and now - cached_node.get("ts", 0) < NODE_TTL:
+      return cached_node
+    token = token or access_token(remote)
+    if not token:
+      raise LookupError("no token")
+    info = drive_get(token, file_id)
+    cached_node = {"id": info.get("id", file_id), "name": info.get("name", ""),
+                   "parents": info.get("parents") or [], "ts": now}
+    nodes[file_id] = cached_node
+    return cached_node
+
+  result = []
+  try:
+    root_id = node("root")["id"] if entries else ""
+    for e in entries:
+      parts = [e.get("name", "")]
+      parents = e.get("parents") or []
+      rel = None
+      for _ in range(64):  # guard against cycles
+        if not parents:
+          break
+        if parents[0] == root_id:
+          rel = "/".join(reversed(parts))
+          break
+        parent = node(parents[0])
+        parts.append(parent["name"])
+        parents = parent["parents"]
+      result.append({"name": e.get("name", ""), "rel": rel or "", "webUrl": e.get("webViewLink", "")})
+  except (OSError, subprocess.TimeoutExpired, LookupError, ValueError):
+    return None
+  finally:
+    save_json("nodes.json", nodes)
+
+  result.sort(key=lambda f: f["name"].casefold())
+  return result
+
+
+def scan_cache(remote):
+  """Size of rclone's local VFS cache, plus pending uploads."""
   pending = 0
   cache_bytes = 0
   # Backend overrides on the mount make rclone suffix the cache dir, e.g. "gdrive{f8sEB}".
   for meta_root in cache_roots("vfsMeta", remote):
     data_root = RCLONE_CACHE / "vfs" / meta_root.name
-    p, b = scan_root(meta_root, data_root, mount_dir, items)
+    p, b = scan_root(meta_root, data_root)
     pending += p
     cache_bytes += b
-  items.sort(key=lambda i: i["accessedTs"], reverse=True)
-  return items[:limit], pending, cache_bytes
+  return pending, cache_bytes
 
 
 def cache_roots(kind, remote):
@@ -110,28 +193,16 @@ def cache_roots(kind, remote):
     return []
 
 
-def scan_root(meta_root, data_root, mount_dir, items):
+def scan_root(meta_root, data_root):
   pending = 0
   for dirpath, _dirs, files in os.walk(meta_root):
     for fname in files:
-      meta_path = Path(dirpath) / fname
-      rel = meta_path.relative_to(meta_root)
       try:
-        info = json.loads(meta_path.read_text(encoding="utf-8"))
+        info = json.loads((Path(dirpath) / fname).read_text(encoding="utf-8"))
       except (OSError, json.JSONDecodeError):
         continue
-      dirty = bool(info.get("Dirty"))
-      if dirty:
+      if info.get("Dirty"):
         pending += 1
-      if not (data_root / rel).exists():
-        continue
-      items.append({
-        "name": rel.name,
-        "path": str(Path(mount_dir) / rel),
-        "folder": str(rel.parent) if str(rel.parent) != "." else "",
-        "accessedTs": parse_time(info.get("ATime")) or parse_time(info.get("ModTime")),
-        "dirty": dirty,
-      })
 
   cache_bytes = 0
   for dirpath, _dirs, files in os.walk(data_root):
@@ -146,7 +217,7 @@ def scan_root(meta_root, data_root, mount_dir, items):
 def main():
   remote = sys.argv[1] if len(sys.argv) > 1 else "gdrive"
   mount_dir = os.path.expanduser(sys.argv[2] if len(sys.argv) > 2 else "~/GoogleDrive")
-  limit = int(sys.argv[3]) if len(sys.argv) > 3 else 12
+  limit = int(sys.argv[3]) if len(sys.argv) > 3 else 20
 
   installed = shutil.which("rclone") is not None
   configured = installed and rclone_configured(remote)
@@ -164,7 +235,7 @@ def main():
     "cacheBytes": 0,
     "pendingUploads": 0,
     "folders": [],
-    "recent": [],
+    "starred": [],
   }
 
   if configured:
@@ -174,7 +245,14 @@ def main():
       result["totalBytes"] = about.get("total", 0)
       result["quotaKnown"] = bool(about.get("total"))
     result["folders"] = list_folders(remote, mount_dir, mounted)
-    result["recent"], result["pendingUploads"], result["cacheBytes"] = scan_cache(remote, mount_dir, limit)
+    starred = cached("starred.json", STARRED_TTL, lambda: starred_folders(remote)) or []
+    result["starred"] = [{
+      "name": f["name"],
+      "path": str(Path(mount_dir) / f["rel"]) if f["rel"] else "",
+      "location": f["rel"].rpartition("/")[0],
+      "webUrl": f["webUrl"],
+    } for f in starred[:limit]]
+    result["pendingUploads"], result["cacheBytes"] = scan_cache(remote)
 
   print(json.dumps(result))
 

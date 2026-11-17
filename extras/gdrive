@@ -1,7 +1,8 @@
 #!/bin/bash
 # Google Drive client for the Omarchy bar (rclone mount + bar widget helpers).
 #   gdrive status   -> Waybar-style JSON for the bar widget
-#   gdrive open [p] -> mount if needed, then open the Drive (or folder p) in Nautilus
+#   gdrive open [p] -> mount if needed, then open the Drive (or folder p) in the
+#                      default file manager (inode/directory: Flea, Folio, ...)
 #   gdrive edit <f> -> mount if needed, then open file f in its default app
 #   gdrive toggle   -> mount/unmount
 #   gdrive web      -> open drive.google.com in the browser
@@ -40,7 +41,9 @@ case "${1:-status}" in
     if ! is_configured; then
       exec omarchy-launch-floating-terminal-with-presentation "$0 setup" 2>/dev/null || exec xdg-terminal-exec "$0" setup
     fi
-    mount_drive && exec uwsm-app -- nautilus --new-window "${2:-$MOUNT_DIR}"
+    # xdg-open follows the inode/directory default in mimeapps.list, so swapping
+    # file managers (Flea now, Folio after the Omarchy upgrade) needs no change here.
+    mount_drive && exec uwsm-app -- xdg-open "${2:-$MOUNT_DIR}"
     ;;
   edit)
     [[ -n $2 ]] || { echo "uso: gdrive edit <arquivo>" >&2; exit 1; }

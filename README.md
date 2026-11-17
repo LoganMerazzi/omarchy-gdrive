@@ -1,8 +1,8 @@
 # Google Drive
 
-Plugin do [Omarchy shell](https://omarchy.org) para o Google Drive montado com o `rclone`. Mostra na barra se o Drive está montado e, no painel, o espaço usado, as pastas e os arquivos abertos recentemente (lidos do cache VFS do rclone), com atalho para reabrir cada um para edição.
+Plugin do [Omarchy shell](https://omarchy.org) para o Google Drive montado com o `rclone`. Mostra na barra se o Drive está montado e, no painel, o espaço usado, as pastas marcadas com estrela no Drive e as pastas da raiz. Pastas com estrela que estão no Meu Drive abrem no gerenciador de arquivos; as compartilhadas com você (fora do mount) abrem no navegador.
 
-![Google Drive: painel com o status de montagem, o armazenamento, os arquivos recentes e as pastas (nomes borrados)](screenshots/gdrive.png)
+![Google Drive: painel com o status de montagem, o armazenamento, as pastas com estrela e as pastas da raiz (nomes borrados)](screenshots/gdrive.png)
 
 ## Instalação
 
@@ -22,7 +22,8 @@ A configuração do rclone, com o token, fica em `~/.config/rclone/rclone.conf`,
 ## Requisitos
 
 - `rclone`, `fuse3`
-- Nautilus, para abrir as pastas e "mostrar arquivo"
+- `curl`, usado para montar o caminho das pastas com estrela
+- um gerenciador de arquivos definido como padrão para `inode/directory` (Flea, Folio, Nautilus…). As pastas abrem com `xdg-open`, então trocar de gerenciador não exige mudança no plugin
 
 ## Atualizar
 
